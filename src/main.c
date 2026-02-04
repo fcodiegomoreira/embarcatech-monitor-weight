@@ -43,6 +43,7 @@ void vApplicationGetTimerTaskMemory(StaticTask_t **ppxTimerTaskTCBBuffer, StackT
     *ppxTimerTaskTCBBuffer = &xTimerTaskTCB; *ppxTimerTaskStackBuffer = uxTimerTaskStack; *pulTimerTaskStackSize = configTIMER_TASK_STACK_DEPTH;
 }
 
+
 void TaskPrint(const char *format, ...) {
     if (xMutexConsole != NULL) {
         // Tenta pegar o Mutex. Espera até 100ms se estiver ocupado
