@@ -13,7 +13,6 @@
 #include "ssd1306.h"
 #include <stdarg.h>
 
-
 // ================= CONFIGURAÇÕES =================
 #define WIFI_SSID       "Gesilane"
 #define WIFI_PASSWORD   "bruxxf6d"
