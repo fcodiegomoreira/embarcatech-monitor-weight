@@ -13,6 +13,7 @@
 #include "ssd1306.h"
 #include <stdarg.h>
 #include "calibration_flash.h"
+#include "screen_display.h"
 
 // ================= CONFIGURAÇÕES =================
 #define WIFI_SSID       "Gesilane"
@@ -22,6 +23,7 @@
 
 #define LED_EXTERNO_PIN 11
 #define BOTAO_A_PIN     5
+#define BOTAO_B_PIN     6
 
 // ================= GLOBAIS =================
 SemaphoreHandle_t xSemaforoBotao;
@@ -214,7 +216,6 @@ void oled_task(void *pvParameters)
         ssd1306_draw_string(&disp, 0, 24, 2, buffer);
         ssd1306_show(&disp);
 
-        
         xQueueOverwrite(xFilaContador, &contador);
 
         contador++;
@@ -255,13 +256,30 @@ void hx711_task(void *pvParameters)
 int main()
 {
     stdio_init_all();
-    sleep_ms(5000);
+
+    gpio_init(BOTAO_B_PIN);
+    gpio_set_dir(BOTAO_B_PIN, GPIO_IN);
+    gpio_pull_up(BOTAO_B_PIN);
+
+    char buffer[20];
+    
+    oled_screen_init_device();
 
     calibration_flash_read(&FlashParamsCalibration);
+    oled_screen_start_calibration();
+
+    bool button_a;
+
+    do 
+    {
+        tight_loop_contents();
+    } while (gpio_get(BOTAO_B_PIN) == 1);
+
+    sleep_ms(5000);
 
     if (FlashParamsCalibration.calibrated_flag != CALIBRATION_VALID_FLAG)
     {
-        printf("Sistema nao calibrado!\n");
+        printf("Sistema nao calibrado!\n"); 
         execute_calibration(&FlashParamsCalibration);
         calibration_flash_write(&FlashParamsCalibration);
     }

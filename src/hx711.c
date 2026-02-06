@@ -1,4 +1,5 @@
 #include "hx711.h"
+#include <stdio.h>
 #include "calibration_flash.h"
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
