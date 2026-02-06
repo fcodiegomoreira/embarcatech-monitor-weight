@@ -10,6 +10,10 @@ typedef struct {
     float scale;
 } hx711_config_t;
 
+
+#define HX711_DATA_PIN  18 
+#define HX711_SCLK_PIN  19 
+
 // --- Protótipos das Funções ---
 
 // Inicializa os pinos GPIO
@@ -26,5 +30,7 @@ long hx711_get_tare(uint pin_dt, uint pin_sck, int samples);
 
 // Realiza a leitura do peso 
 float hx711_get_weight(uint pin_dt, uint pin_sck, long offset, float scale);
+
+void execute_calibration(calibration_data_t *calib);
 
 #endif // HX711_H

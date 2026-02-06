@@ -12,6 +12,7 @@
 #include "lwip/apps/http_client.h"
 #include "ssd1306.h"
 #include <stdarg.h>
+#include "calibration_flash.h"
 
 // ================= CONFIGURAÇÕES =================
 #define WIFI_SSID       "Gesilane"
@@ -21,15 +22,15 @@
 
 #define LED_EXTERNO_PIN 11
 #define BOTAO_A_PIN     5
-#define HX711_DATA_PIN  18 
-#define HX711_SCLK_PIN  19 
 
 // Globais
 SemaphoreHandle_t xSemaforoBotao;
 QueueHandle_t xFilaContador;
-SemaphoreHandle_t xMutexConsole; // <--- Adicione esta linha
+SemaphoreHandle_t xMutexConsole;
 static uint32_t ultimo_tempo_botao = 0;
 static volatile bool requisicao_em_curso = false;
+calibration_data_t FlashParamsCalibration;
+hx711_config_t SensorDataCalibration;
 
 // ====== FreeRTOS Static Memory ======
 void vApplicationGetIdleTaskMemory(StaticTask_t **ppxIdleTaskTCBBuffer, StackType_t **ppxIdleTaskStackBuffer, uint32_t *pulIdleTaskStackSize) {
@@ -58,7 +59,8 @@ void TaskPrint(const char *format, ...) {
 }
 
 // ===================== CALLBACK HTTP =====================
-static void http_client_callback(void *arg, httpc_result_t httpc_result, u32_t rx_content_len, u32_t srv_res, err_t err) 
+static void http_client_callback(void *arg, httpc_result_t httpc_result, 
+                                 u32_t rx_content_len, u32_t srv_res, err_t err)
 {
     // Forçamos a conversão para um tipo de dado simples
     int res_limpo = (int)((intptr_t)httpc_result & 0xFF); 
@@ -103,14 +105,19 @@ void http_post_task(void *pvParameters)
                 snprintf(uri_com_dados, sizeof(uri_com_dados), "/data?contador=%d", valor_recebido);
 
                 cyw43_arch_lwip_begin();
-                err_t erro_conexao = httpc_get_file_dns(SERVER_IP, SERVER_PORT, uri_com_dados, &settings, http_client_callback, NULL, NULL);
-                cyw43_arch_lwip_end();
+err_t erro_conexao = httpc_get_file_dns(SERVER_IP, SERVER_PORT, uri_com_dados, &settings, (httpc_result_fn)http_client_callback, NULL, NULL);
+cyw43_arch_lwip_end();
 
-                if (erro_conexao != ERR_OK) {
-                    TaskPrint("HTTP: Erro de Memoria/Socket! Tentando limpar...\n");
-                    requisicao_em_curso = false; 
-                    vTaskDelay(pdMS_TO_TICKS(5000)); // Espera 5 segundos para o Windows limpar a porta
-                }
+if (erro_conexao != ERR_OK) {
+    TaskPrint("HTTP: Erro %d detectado. Resetando...\n", erro_conexao);
+    
+    // IMPORTANTE: Liberamos a flag aqui, senão a task nunca mais tenta enviar
+    requisicao_em_curso = false; 
+    
+    // Se o erro for 5 ou similar, o lwIP precisa de um "respiro" maior
+    // Vamos esperar 10 segundos antes de permitir a próxima tentativa
+    vTaskDelay(pdMS_TO_TICKS(10000)); 
+}
             }
         }
         // Aumentamos o delay entre envios para 5 segundos para garantir estabilidade
@@ -170,54 +177,12 @@ void wifi_connect_device(void *pvParameters)
     }
 }
 
-void sensor_pressao_task(void *pvParameters) 
-{
-    hx711_config_t config;
-    config.pin_dt = HX711_DATA_PIN;
-    config.pin_sck = HX711_SCLK_PIN;
-    config.offset = 0;
-    config.scale = 1.0f;
 
-    hx711_init(config.pin_dt, config.pin_sck);
 
-    printf("Estabilizando sensor... Mantenha sem carga.\n");
-    vTaskDelay(pdMS_TO_TICKS(5000));
-
-    config.offset = hx711_get_tare(config.pin_dt, config.pin_sck, 10);
-    printf("Tara concluída! Offset: %ld\n", config.offset);
-    printf("--------------------------------------------------\n");
-
-    printf("Prepare o peso de 85g...\n");
-    for(int i = 3; i > 0; i--) 
-    {
-        printf("Coloque o peso! Iniciando em %d...\n", i);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-
-    printf("Calculando fator de escala... mantenha o peso parado.\n");
-
-    long leitura_com_peso = 0;
-    int amostras = 15; 
+        // float peso_final = hx711_get_weight(config.pin_dt, config.pin_sck, config.offset, config.scale);
+        // TaskPrint("Peso: %.2f g\n", peso_final);
+        // vTaskDelay(pdMS_TO_TICKS(1000));
     
-    for(int i = 0; i < amostras; i++) 
-    {
-        leitura_com_peso += hx711_read(config.pin_dt, config.pin_sck);
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    leitura_com_peso /= amostras;
-
-    config.scale = (float)(leitura_com_peso - config.offset) / 85.0f;
-
-    printf("Calibracao terminada! Seu SCALE e: %.4f\n", config.scale);
-    printf("--------------------------------------------------\n");
-
-    while (true) 
-    {
-        float peso_final = hx711_get_weight(config.pin_dt, config.pin_sck, config.offset, config.scale);
-        TaskPrint("Peso: %.2f g\n", peso_final);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
 
 void oled_task(void *pvParameters) 
 {
@@ -249,27 +214,37 @@ void oled_task(void *pvParameters)
 }
 
 // ===================== MAIN =====================
-int main() 
+int main()
 {
     stdio_init_all();
 
-    // Inicializa o Mutex do Console
-    xMutexConsole = xSemaphoreCreateMutex();
+    // Lê dados de calibração da flash
+    calibration_flash_read(&FlashParamsCalibration);
 
+    // Verifica se a calibração é válida
+    if (FlashParamsCalibration.calibrated_flag != CALIBRATION_VALID_FLAG)
+    {
+        execute_calibration(&SensorDataCalibration);
+
+        FlashParamsCalibration.calibrated_flag = CALIBRATION_VALID_FLAG;
+        FlashParamsCalibration.tare = SensorDataCalibration.offset;
+        FlashParamsCalibration.scale_factor = SensorDataCalibration.scale;
+
+        calibration_flash_write(&FlashParamsCalibration);
+    }
+
+    // Inicializa RTOS
+    xMutexConsole = xSemaphoreCreateMutex();
     xSemaforoBotao = xSemaphoreCreateBinary();
     xFilaContador = xQueueCreate(1, sizeof(int));
 
-    // Aumentamos a Stack para 4096 e prioridade 2 para garantir fluidez
-    xTaskCreate(http_post_task, "HTTP_Task", 2048, NULL, 1, NULL); // Prioridade 1
-    xTaskCreate(sensor_pressao_task, "Sensor_Task", 1024, NULL, 1, NULL);
-    
+    xTaskCreate(http_post_task, "HTTP_Task", 4096, NULL, 1, NULL);
     xTaskCreate(release_product_button, "Botao_Task", 512, NULL, 2, NULL);
     xTaskCreate(wifi_connect_device, "WiFi_Task", 1024, NULL, 1, NULL);
     xTaskCreate(oled_task, "OLED_Task", 1024, NULL, 1, NULL);
 
     vTaskStartScheduler();
-    while(1) 
-    { 
-        
-    }
+
+    while (1) {}
 }
+

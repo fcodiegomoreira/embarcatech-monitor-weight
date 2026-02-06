@@ -3,6 +3,7 @@ add_executable(rp2040-freertos-template
     main.c
     hx711.c
     ssd1306.c
+    calibration_flash.c
 )
 
 # Avisa o compilador onde está o hx711.h (que está na pasta include)
