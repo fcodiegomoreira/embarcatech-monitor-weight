@@ -8,10 +8,10 @@
 #define CALIBRATION_VALID_FLAG   123
 
 /* Estrutura armazenada na flash */
-typedef struct {
-    uint8_t  calibrated_flag;   // 123 = calibrado
-    uint16_t tare;              // valor da tara
-    float    scale_factor;      // fator de calibração
+typedef struct calibration_data {
+    uint8_t calibrated_flag;
+    uint16_t tare;
+    float scale_factor;
 } calibration_data_t;
 
 /* API pública do módulo */
@@ -33,5 +33,8 @@ void calibration_flash_write(const calibration_data_t *data);
  * @return true se calibrada, false caso contrário
  */
 bool calibration_flash_is_valid(void);
+
+void calibration_flash_erase(void);
+
 
 #endif /* CALIBRATION_FLASH_H */

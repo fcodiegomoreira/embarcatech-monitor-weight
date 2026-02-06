@@ -1,8 +1,8 @@
 #include "hx711.h"
+#include "calibration_flash.h"
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
 #include "hardware/sync.h"
-#include "calibration_flash.h"
 
 // Inicializa os pinos configurando direções e estados iniciais
 void hx711_init(uint pin_dt, uint pin_sck) 

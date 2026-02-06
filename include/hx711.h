@@ -10,6 +10,7 @@ typedef struct {
     float scale;
 } hx711_config_t;
 
+typedef struct calibration_data calibration_data_t;
 
 #define HX711_DATA_PIN  18 
 #define HX711_SCLK_PIN  19 

@@ -50,3 +50,13 @@ bool calibration_flash_is_valid(void)
 
     return (data.calibrated_flag == CALIBRATION_VALID_FLAG);
 }
+
+void calibration_flash_erase(void)
+{
+    uint32_t ints = save_and_disable_interrupts();
+
+    /* Apaga o setor onde estão os dados de calibração */
+    flash_range_erase(FLASH_TARGET_OFFSET, FLASH_SECTOR_SIZE);
+
+    restore_interrupts(ints);
+}

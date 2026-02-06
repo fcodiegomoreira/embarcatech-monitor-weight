@@ -66,17 +66,17 @@ static void http_client_callback(void *arg, httpc_result_t httpc_result,
     int res_limpo = (int)((intptr_t)httpc_result & 0xFF); 
 
     // Se o resultado for 0 (HTTPC_RESULT_OK), imprimimos o status do servidor
-    if (res_limpo == 0) {
+    if (res_limpo == 0) 
+    {
         TaskPrint("HTTP: Sucesso! Status: %u\n", (unsigned int)srv_res);
     } 
-    // Se for um erro conhecido (0 a 255), mostramos o erro
-    else if (res_limpo > 0 && res_limpo < 10) {
+    
+    else 
+    if (res_limpo > 0 && res_limpo < 10) 
+    {
         TaskPrint("HTTP: Falha Cod %d\n", res_limpo);
     }
-    // Se for um número gigante, apenas ignoramos para não poluir o log
-    else {
-        // Opcional: TaskPrint("HTTP: Conexao encerrada.\n");
-    }
+
 
     requisicao_em_curso = false; 
 }
@@ -108,19 +108,17 @@ void http_post_task(void *pvParameters)
 err_t erro_conexao = httpc_get_file_dns(SERVER_IP, SERVER_PORT, uri_com_dados, &settings, (httpc_result_fn)http_client_callback, NULL, NULL);
 cyw43_arch_lwip_end();
 
-if (erro_conexao != ERR_OK) {
-    TaskPrint("HTTP: Erro %d detectado. Resetando...\n", erro_conexao);
-    
-    // IMPORTANTE: Liberamos a flag aqui, senão a task nunca mais tenta enviar
-    requisicao_em_curso = false; 
-    
-    // Se o erro for 5 ou similar, o lwIP precisa de um "respiro" maior
-    // Vamos esperar 10 segundos antes de permitir a próxima tentativa
-    vTaskDelay(pdMS_TO_TICKS(10000)); 
-}
+        if (erro_conexao != ERR_OK) 
+        {
+            TaskPrint("HTTP: Erro %d detectado. Resetando...\n", erro_conexao);
+            
+            requisicao_em_curso = false; 
+            
+            vTaskDelay(pdMS_TO_TICKS(10000)); 
+        }
             }
         }
-        // Aumentamos o delay entre envios para 5 segundos para garantir estabilidade
+
         vTaskDelay(pdMS_TO_TICKS(5000)); 
     }
 }
@@ -172,8 +170,11 @@ void wifi_connect_device(void *pvParameters)
 
     while (true) 
     {
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1); vTaskDelay(pdMS_TO_TICKS(500));
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0); vTaskDelay(pdMS_TO_TICKS(500));
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1); 
+        vTaskDelay(pdMS_TO_TICKS(500));
+
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0); 
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
@@ -217,6 +218,7 @@ void oled_task(void *pvParameters)
 int main()
 {
     stdio_init_all();
+    sleep_ms(5000);
 
     // Lê dados de calibração da flash
     calibration_flash_read(&FlashParamsCalibration);
@@ -224,13 +226,18 @@ int main()
     // Verifica se a calibração é válida
     if (FlashParamsCalibration.calibrated_flag != CALIBRATION_VALID_FLAG)
     {
-        execute_calibration(&SensorDataCalibration);
+        printf("Sistema nao calibrado!\n\n");
+        execute_calibration(&FlashParamsCalibration);
 
         FlashParamsCalibration.calibrated_flag = CALIBRATION_VALID_FLAG;
         FlashParamsCalibration.tare = SensorDataCalibration.offset;
         FlashParamsCalibration.scale_factor = SensorDataCalibration.scale;
 
         calibration_flash_write(&FlashParamsCalibration);
+    }
+    else
+    {
+        printf("Calibrado");
     }
 
     // Inicializa RTOS
