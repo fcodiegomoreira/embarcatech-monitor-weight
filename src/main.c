@@ -214,6 +214,7 @@ void oled_task(void *pvParameters)
         ssd1306_draw_string(&disp, 0, 24, 2, buffer);
         ssd1306_show(&disp);
 
+        
         xQueueOverwrite(xFilaContador, &contador);
 
         contador++;
