@@ -113,7 +113,7 @@ void execute_calibration(calibration_data_t *calib)
     hx711_init(config.pin_dt, config.pin_sck);
 
     printf("Estabilizando sensor... Mantenha sem carga.\n");
-    sleep_ms(5000);   // ⬅️ agora NÃO é mais vTaskDelay
+    sleep_ms(7000);   // ⬅️ agora NÃO é mais vTaskDelay
 
     config.offset = hx711_get_tare(config.pin_dt, config.pin_sck, 10);
     printf("Tara concluída! Offset: %ld\n", config.offset);
@@ -123,7 +123,7 @@ void execute_calibration(calibration_data_t *calib)
     for (int i = 3; i > 0; i--)
     {
         printf("Coloque o peso! Iniciando em %d...\n", i);
-        sleep_ms(1000);
+        sleep_ms(1500);
     }
 
     printf("Calculando fator de escala... mantenha o peso parado.\n");
@@ -145,8 +145,9 @@ void execute_calibration(calibration_data_t *calib)
     printf("Scale : %.4f\n", config.scale);
     printf("--------------------------------------------------\n");
 
+
     /* 🔽 Preenche a struct recebida por ponteiro */
     calib->calibrated_flag = CALIBRATION_VALID_FLAG;
-    calib->tare            = (uint16_t)config.offset;
+    calib->tare            = config.offset;   // SEM cast
     calib->scale_factor    = config.scale;
 }

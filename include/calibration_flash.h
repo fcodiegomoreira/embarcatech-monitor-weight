@@ -10,7 +10,7 @@
 /* Estrutura armazenada na flash */
 typedef struct calibration_data {
     uint8_t calibrated_flag;
-    uint16_t tare;
+    uint32_t tare;
     float scale_factor;
 } calibration_data_t;
 
@@ -35,6 +35,5 @@ void calibration_flash_write(const calibration_data_t *data);
 bool calibration_flash_is_valid(void);
 
 void calibration_flash_erase(void);
-
 
 #endif /* CALIBRATION_FLASH_H */
