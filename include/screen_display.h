@@ -12,5 +12,6 @@
 
 void oled_screen_init_device(void);
 void oled_screen_start_calibration(void);
+void oled_screen_finished_calibration(void);
 
 #endif

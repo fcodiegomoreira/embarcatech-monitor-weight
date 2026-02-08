@@ -14,6 +14,7 @@
 #include <stdarg.h>
 #include "calibration_flash.h"
 #include "screen_display.h"
+#include "telemetry_control.h"
 
 // ================= CONFIGURAÇÕES =================
 #define WIFI_SSID       "Gesilane"
@@ -195,12 +196,6 @@ void wifi_connect_device(void *pvParameters)
 // ===================== OLED =====================
 void oled_task(void *pvParameters)
 {
-    i2c_init(i2c1, 400000);
-    gpio_set_function(14, GPIO_FUNC_I2C);
-    gpio_set_function(15, GPIO_FUNC_I2C);
-    gpio_pull_up(14);
-    gpio_pull_up(15);
-
     ssd1306_t disp;
     disp.external_vcc = false;
     ssd1306_init(&disp, 128, 64, 0x3C, i2c1);
@@ -252,6 +247,33 @@ void hx711_task(void *pvParameters)
     }
 }
 
+void bomba_task(void *pvParameters) {
+    // Pegamos a fila que foi passada por parâmetro na criação da task
+    QueueHandle_t fila = (QueueHandle_t)pvParameters;
+    int tempo_recebido;
+    
+    // Configuração do pino (Exemplo: pino 12)
+    const uint PINO_BOMBA = 12; 
+    gpio_init(PINO_BOMBA);
+    gpio_set_dir(PINO_BOMBA, GPIO_OUT);
+    gpio_put(PINO_BOMBA, 0); // Garante que começa desligada
+
+    while (true) {
+        // xQueueReceive trava a task aqui até que chegue algo na fila
+        // portMAX_DELAY significa: "espere o tempo que for preciso"
+        if (xQueueReceive(fila, &tempo_recebido, portMAX_DELAY)) {
+            
+            TaskPrint("BOMBA: Ativando por %d ms...\n", tempo_recebido);
+            
+            gpio_put(PINO_BOMBA, 1);               // LIGA
+            vTaskDelay(pdMS_TO_TICKS(tempo_recebido)); // ESPERA (sem travar o resto do sistema)
+            gpio_put(PINO_BOMBA, 0);               // DESLIGA
+            
+            TaskPrint("BOMBA: Ciclo finalizado.\n");
+        }
+    }
+}
+
 // ===================== MAIN =====================
 int main()
 {
@@ -275,26 +297,32 @@ int main()
         tight_loop_contents();
     } while (gpio_get(BOTAO_B_PIN) == 1);
 
-    sleep_ms(5000);
-
     if (FlashParamsCalibration.calibrated_flag != CALIBRATION_VALID_FLAG)
     {
-        printf("Sistema nao calibrado!\n"); 
         execute_calibration(&FlashParamsCalibration);
         calibration_flash_write(&FlashParamsCalibration);
+        oled_screen_finished_calibration();
     }
 
     xMutexConsole = xSemaphoreCreateMutex();
     xSemaforoBotao = xSemaphoreCreateBinary();
     xFilaContador = xQueueCreate(1, sizeof(int));
 
+    QueueHandle_t xFilaTemp = xQueueCreate(5, sizeof(int));
+    telemetry_set_bomba_queue(xFilaTemp);
+
     xTaskCreate(http_post_task, "HTTP", 4096, NULL, 1, NULL);
     xTaskCreate(release_product_button, "Botao", 512, NULL, 2, NULL);
     xTaskCreate(wifi_connect_device, "WiFi", 1024, NULL, 1, NULL);
     xTaskCreate(oled_task, "OLED", 1024, NULL, 1, NULL);
     xTaskCreate(hx711_task, "HX711", 1024, NULL, 2, NULL);
-
+    xTaskCreate(serial_telemetry_task, "Telemetry", 1024, NULL, 1, NULL);
+    xTaskCreate(bomba_task, "BombaTask", 512, (void*)xFilaTemp, 2, NULL);
+    
     vTaskStartScheduler();
 
-    while (1) {}
+    while (1) 
+    {
+
+    }
 }

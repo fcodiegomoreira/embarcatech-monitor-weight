@@ -29,3 +29,11 @@ void oled_screen_start_calibration(void)
     ssd1306_draw_string(&disp, 20, 37, 1, "botao Iniciar!");
     ssd1306_show(&disp);
 }
+
+void oled_screen_finished_calibration(void)
+{
+    ssd1306_clear(&disp);
+    ssd1306_draw_string(&disp, 34, 25, 1, "Finished");
+    ssd1306_draw_string(&disp, 25, 37, 1, "calibration");
+    ssd1306_show(&disp);
+}
