@@ -37,3 +37,12 @@ void oled_screen_finished_calibration(void)
     ssd1306_draw_string(&disp, 25, 37, 1, "calibration");
     ssd1306_show(&disp);
 }
+
+void oled_screen_update_counter(int valor) {
+    char buffer[20];
+    ssd1306_clear(&disp);
+    ssd1306_draw_string(&disp, 0, 8, 1, "Contador:");
+    snprintf(buffer, sizeof(buffer), "%d", valor);
+    ssd1306_draw_string(&disp, 0, 24, 2, buffer);
+    ssd1306_show(&disp);
+}

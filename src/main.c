@@ -26,6 +26,8 @@
 #define BOTAO_A_PIN     5
 #define BOTAO_B_PIN     6
 
+static volatile bool sistema_bloqueado = false;
+
 // ================= GLOBAIS =================
 SemaphoreHandle_t xSemaforoBotao;
 QueueHandle_t xFilaContador;
@@ -64,7 +66,7 @@ void TaskPrint(const char *format, ...)
 {
     if (xMutexConsole != NULL)
     {
-        if (xSemaphoreTake(xMutexConsole, pdMS_TO_TICKS(100)) == pdPASS)
+        if (xSemaphoreTake(xMutexConsole, pdMS_TO_TICKS(10)) == pdPASS)
         {
             va_list args;
             va_start(args, format);
@@ -165,8 +167,22 @@ void release_product_button(void *pvParameters)
     while (true)
     {
         if (xSemaphoreTake(xSemaforoBotao, portMAX_DELAY) == pdPASS)
-        {
-            TaskPrint("Botao A pressionado!\n");
+        {   
+            sistema_bloqueado = true;
+
+            UBaseType_t prioridadeOriginal = uxTaskPriorityGet(NULL);
+            vTaskPrioritySet(NULL, configMAX_PRIORITIES - 1);
+
+            execute_calibration(&FlashParamsCalibration);
+            calibration_flash_write(&FlashParamsCalibration);
+
+            vTaskPrioritySet(NULL, prioridadeOriginal);
+            vTaskDelay(pdMS_TO_TICKS(100));
+
+            
+            oled_screen_finished_calibration();
+
+            sistema_bloqueado = false;
         }
     }
 }
@@ -196,20 +212,17 @@ void wifi_connect_device(void *pvParameters)
 // ===================== OLED =====================
 void oled_task(void *pvParameters)
 {
-    ssd1306_t disp;
-    disp.external_vcc = false;
-    ssd1306_init(&disp, 128, 64, 0x3C, i2c1);
-
     int contador = 0;
     char buffer[20];
 
     while (true)
     {
-        ssd1306_clear(&disp);
-        ssd1306_draw_string(&disp, 0, 8, 1, "Contador:");
-        snprintf(buffer, sizeof(buffer), "%d", contador);
-        ssd1306_draw_string(&disp, 0, 24, 2, buffer);
-        ssd1306_show(&disp);
+        if (sistema_bloqueado) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        oled_screen_update_counter(contador);
 
         xQueueOverwrite(xFilaContador, &contador);
 
@@ -235,6 +248,12 @@ void hx711_task(void *pvParameters)
 
     while (true)
     {
+
+        if (sistema_bloqueado) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         float peso = hx711_get_weight(
             HX711_DATA_PIN,
             HX711_SCLK_PIN,
@@ -279,13 +298,17 @@ int main()
 {
     stdio_init_all();
 
+    xMutexConsole = xSemaphoreCreateMutex();
+    xSemaforoBotao = xSemaphoreCreateBinary();
+    xFilaContador = xQueueCreate(1, sizeof(int));
+
+    oled_screen_init_device();
+
     gpio_init(BOTAO_B_PIN);
     gpio_set_dir(BOTAO_B_PIN, GPIO_IN);
     gpio_pull_up(BOTAO_B_PIN);
 
     char buffer[20];
-    
-    oled_screen_init_device();
 
     calibration_flash_read(&FlashParamsCalibration);
     oled_screen_start_calibration();
@@ -304,21 +327,17 @@ int main()
         oled_screen_finished_calibration();
     }
 
-    xMutexConsole = xSemaphoreCreateMutex();
-    xSemaforoBotao = xSemaphoreCreateBinary();
-    xFilaContador = xQueueCreate(1, sizeof(int));
-
     QueueHandle_t xFilaTemp = xQueueCreate(5, sizeof(int));
     telemetry_set_bomba_queue(xFilaTemp);
 
     xTaskCreate(http_post_task, "HTTP", 4096, NULL, 1, NULL);
-    xTaskCreate(release_product_button, "Botao", 512, NULL, 2, NULL);
+    xTaskCreate(release_product_button, "Botao", 2048, NULL, 2, NULL);
     xTaskCreate(wifi_connect_device, "WiFi", 1024, NULL, 1, NULL);
-    xTaskCreate(oled_task, "OLED", 1024, NULL, 1, NULL);
-    xTaskCreate(hx711_task, "HX711", 1024, NULL, 2, NULL);
+    xTaskCreate(oled_task, "OLED", 2048, NULL, 1, NULL);
+    xTaskCreate(hx711_task, "HX711", 2048, NULL, 2, NULL);
     xTaskCreate(serial_telemetry_task, "Telemetry", 1024, NULL, 1, NULL);
     xTaskCreate(bomba_task, "BombaTask", 512, (void*)xFilaTemp, 2, NULL);
-    
+
     vTaskStartScheduler();
 
     while (1) 
