@@ -1,4 +1,6 @@
 #include "hx711.h"
+#include <stdio.h>
+#include "calibration_flash.h"
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
 #include "hardware/sync.h"
@@ -98,4 +100,57 @@ float hx711_get_weight(uint pin_dt, uint pin_sck, long offset, float scale)
     if (raw == 0) return 0.0f; // Caso ocorra timeout
     
     return (float)(raw - offset) / scale;
+}
+
+void execute_calibration(calibration_data_t *calib)
+{
+    hx711_config_t config;
+
+    config.pin_dt  = HX711_DATA_PIN;
+    config.pin_sck = HX711_SCLK_PIN;
+    config.offset  = 0;
+    config.scale   = 1.0f;
+
+    hx711_init(config.pin_dt, config.pin_sck);
+
+    printf("Estabilizando sensor... Mantenha sem carga.\n");
+
+    oled_screen_start_calibration();
+    busy_wait_ms(3000);
+    config.offset = hx711_get_tare(config.pin_dt, config.pin_sck, 10);
+    printf("Tara concluída! Offset: %ld\n", config.offset);
+    printf("--------------------------------------------------\n");
+
+    oled_screen_put_weight();
+
+    printf("Prepare o peso de 85g...\n");
+    for (int i = 3; i > 0; i--)
+    {
+        printf("Coloque o peso! Iniciando em %d...\n", i);
+        busy_wait_ms(1500);
+    }
+
+    printf("Calculando fator de escala... mantenha o peso parado.\n");
+
+    long leitura_com_peso = 0;
+    int amostras = 15;
+
+    for (int i = 0; i < amostras; i++)
+    {
+        leitura_com_peso += hx711_read(config.pin_dt, config.pin_sck);
+        busy_wait_ms(100);
+    }
+    leitura_com_peso /= amostras;
+
+    config.scale = (float)(leitura_com_peso - config.offset) / 85.0f;
+
+    printf("Calibracao terminada!\n");
+    printf("Offset: %ld\n", config.offset);
+    printf("Scale : %.4f\n", config.scale);
+    printf("--------------------------------------------------\n");
+    oled_screen_finished_calibration();
+    busy_wait_ms(3000);
+    calib->calibrated_flag = CALIBRATION_VALID_FLAG;
+    calib->tare            = config.offset;   // SEM cast
+    calib->scale_factor    = config.scale;
 }

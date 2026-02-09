@@ -1,0 +1,64 @@
+#include <stdio.h>
+#include <string.h>
+#include "FreeRTOS.h" // Deve ser o primeiro do FreeRTOS
+#include "task.h"     // Opcional se não usar tasks aqui
+#include "semphr.h"   // Agora ele vai reconhecer os tipos
+#include "screen_display.h"
+
+static ssd1306_t disp;
+
+void oled_screen_init_device(void)
+{
+    i2c_init(i2c1, 400000);
+
+    gpio_set_function(14, GPIO_FUNC_I2C);
+    gpio_set_function(15, GPIO_FUNC_I2C);
+
+    gpio_pull_up(14);
+    gpio_pull_up(15);
+
+    disp.external_vcc = false;
+    ssd1306_init(&disp, 128, 64, 0x3C, i2c1);
+}
+
+void oled_screen_show_vending(void)
+{
+    ssd1306_clear(&disp);
+    ssd1306_draw_string(&disp, 34, 25, 1, "Processando");
+    ssd1306_draw_string(&disp, 42, 37, 1, "dados...");
+    ssd1306_show(&disp);
+}
+
+void oled_screen_put_weight(void)
+{
+    ssd1306_clear(&disp);
+    ssd1306_draw_string(&disp, 15, 25, 1, "Inserir peso (85g)");
+    ssd1306_draw_string(&disp, 28, 37, 1, "Aguarde 5s...");
+    ssd1306_show(&disp);
+}
+
+void oled_screen_start_calibration(void)
+{
+    ssd1306_clear(&disp);
+    ssd1306_draw_string(&disp, 0, 0, 1, "Iniciando calibracao!");
+    ssd1306_draw_string(&disp, 30, 25, 1, "Pressione o");
+    ssd1306_draw_string(&disp, 20, 37, 1, "botao Iniciar!");
+    ssd1306_show(&disp);
+}
+
+void oled_screen_finished_calibration(void)
+{
+    ssd1306_clear(&disp);
+    ssd1306_draw_string(&disp, 36, 25, 1, "Calibracao");
+    ssd1306_draw_string(&disp, 36, 37, 1, "finalizada");
+    ssd1306_show(&disp);
+}
+
+void oled_screen_update_counter(int valor) {
+    char buffer[20];
+    ssd1306_clear(&disp);
+    ssd1306_draw_string(&disp, 0, 8, 1, "Contador:");
+    snprintf(buffer, sizeof(buffer), "%d", valor);
+    ssd1306_draw_string(&disp, 0, 24, 2, buffer);
+    ssd1306_show(&disp);
+}

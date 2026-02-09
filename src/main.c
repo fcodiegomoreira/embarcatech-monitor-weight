@@ -12,264 +12,363 @@
 #include "lwip/apps/http_client.h"
 #include "ssd1306.h"
 #include <stdarg.h>
+#include "calibration_flash.h"
+#include "screen_display.h"
+#include "telemetry_control.h"
 
 // ================= CONFIGURAÇÕES =================
 #define WIFI_SSID       "Gesilane"
 #define WIFI_PASSWORD   "bruxxf6d"
-#define SERVER_IP       "192.168.1.2" 
+#define SERVER_IP       "192.168.1.2"
 #define SERVER_PORT     5000
 
 #define LED_EXTERNO_PIN 11
 #define BOTAO_A_PIN     5
-#define HX711_DATA_PIN  18 
-#define HX711_SCLK_PIN  19 
+#define BOTAO_B_PIN     6
 
-// Globais
+static volatile bool sistema_bloqueado = false;
+
+// ================= GLOBAIS =================
 SemaphoreHandle_t xSemaforoBotao;
 QueueHandle_t xFilaContador;
-SemaphoreHandle_t xMutexConsole; // <--- Adicione esta linha
+QueueHandle_t xFilaPeso; // Substitua xFilaContador por esta
+SemaphoreHandle_t xMutexConsole;
+
 static uint32_t ultimo_tempo_botao = 0;
 static volatile bool requisicao_em_curso = false;
 
+static calibration_data_t FlashParamsCalibration;
+
 // ====== FreeRTOS Static Memory ======
-void vApplicationGetIdleTaskMemory(StaticTask_t **ppxIdleTaskTCBBuffer, StackType_t **ppxIdleTaskStackBuffer, uint32_t *pulIdleTaskStackSize) {
+void vApplicationGetIdleTaskMemory(StaticTask_t **ppxIdleTaskTCBBuffer,
+                                  StackType_t **ppxIdleTaskStackBuffer,
+                                  uint32_t *pulIdleTaskStackSize)
+{
     static StaticTask_t xIdleTaskTCB;
     static StackType_t uxIdleTaskStack[configMINIMAL_STACK_SIZE];
-    *ppxIdleTaskTCBBuffer = &xIdleTaskTCB; *ppxIdleTaskStackBuffer = uxIdleTaskStack; *pulIdleTaskStackSize = configMINIMAL_STACK_SIZE;
+    *ppxIdleTaskTCBBuffer = &xIdleTaskTCB;
+    *ppxIdleTaskStackBuffer = uxIdleTaskStack;
+    *pulIdleTaskStackSize = configMINIMAL_STACK_SIZE;
 }
-void vApplicationGetTimerTaskMemory(StaticTask_t **ppxTimerTaskTCBBuffer, StackType_t **ppxTimerTaskStackBuffer, uint32_t *pulTimerTaskStackSize) {
+
+void vApplicationGetTimerTaskMemory(StaticTask_t **ppxTimerTaskTCBBuffer,
+                                   StackType_t **ppxTimerTaskStackBuffer,
+                                   uint32_t *pulTimerTaskStackSize)
+{
     static StaticTask_t xTimerTaskTCB;
     static StackType_t uxTimerTaskStack[configTIMER_TASK_STACK_DEPTH];
-    *ppxTimerTaskTCBBuffer = &xTimerTaskTCB; *ppxTimerTaskStackBuffer = uxTimerTaskStack; *pulTimerTaskStackSize = configTIMER_TASK_STACK_DEPTH;
+    *ppxTimerTaskTCBBuffer = &xTimerTaskTCB;
+    *ppxTimerTaskStackBuffer = uxTimerTaskStack;
+    *pulTimerTaskStackSize = configTIMER_TASK_STACK_DEPTH;
 }
 
-
-void TaskPrint(const char *format, ...) {
-    if (xMutexConsole != NULL) {
-        // Tenta pegar o Mutex. Espera até 100ms se estiver ocupado
-        if (xSemaphoreTake(xMutexConsole, pdMS_TO_TICKS(100)) == pdPASS) {
+// ================= PRINT THREAD-SAFE =================
+void TaskPrint(const char *format, ...)
+{
+    if (xMutexConsole != NULL)
+    {
+        if (xSemaphoreTake(xMutexConsole, pdMS_TO_TICKS(10)) == pdPASS)
+        {
             va_list args;
             va_start(args, format);
-            vprintf(format, args); // vprintf é a versão do printf para argumentos variados
+            vprintf(format, args);
             va_end(args);
-            xSemaphoreGive(xMutexConsole); // Solta o console para a próxima task
+            xSemaphoreGive(xMutexConsole);
         }
     }
 }
 
-// ===================== CALLBACK HTTP =====================
-static void http_client_callback(void *arg, httpc_result_t httpc_result, u32_t rx_content_len, u32_t srv_res, err_t err) 
-{
-    // Forçamos a conversão para um tipo de dado simples
-    int res_limpo = (int)((intptr_t)httpc_result & 0xFF); 
+TaskHandle_t xHTTPTaskHandle = NULL;
 
-    // Se o resultado for 0 (HTTPC_RESULT_OK), imprimimos o status do servidor
-    if (res_limpo == 0) {
+// ===================== CALLBACK HTTP =====================
+static void http_client_callback(void *arg, httpc_result_t httpc_result,
+                                 u32_t rx_content_len, u32_t srv_res, err_t err)
+{
+    int res_limpo = (int)((intptr_t)httpc_result & 0xFF);
+
+    if (res_limpo == 0)
+    {
         TaskPrint("HTTP: Sucesso! Status: %u\n", (unsigned int)srv_res);
-    } 
-    // Se for um erro conhecido (0 a 255), mostramos o erro
-    else if (res_limpo > 0 && res_limpo < 10) {
+    }
+    else if (res_limpo > 0 && res_limpo < 10)
+    {
         TaskPrint("HTTP: Falha Cod %d\n", res_limpo);
     }
-    // Se for um número gigante, apenas ignoramos para não poluir o log
-    else {
-        // Opcional: TaskPrint("HTTP: Conexao encerrada.\n");
+
+    // Após o término (sucesso ou falha), voltamos a prioridade da Task HTTP para 1
+    if (xHTTPTaskHandle != NULL) {
+        vTaskPrioritySet(xHTTPTaskHandle, 1);
     }
 
-    requisicao_em_curso = false; 
+    requisicao_em_curso = false;
 }
 
-// ===================== TASK: ENVIO HTTP (MODIFICADA) =====================
-void http_post_task(void *pvParameters) 
+// ===================== TASK HTTP =====================
+void http_post_task(void *pvParameters)
 {
-    int valor_recebido;
+    float valor_recebido; // Alterado para float para receber o peso
     static httpc_connection_t settings;
     static char uri_com_dados[64];
 
-    while (true) 
+    xHTTPTaskHandle = xTaskGetCurrentTaskHandle();
+
+    while (true)
     {
-        if (xQueueReceive(xFilaContador, &valor_recebido, portMAX_DELAY)) 
-        {            
-            // Se houver falha persistente, este bloco garante que não tentaremos 
-            // abrir conexões infinitas atropelando o hardware
-            if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP) 
-            {
+        // Agora recebe da xFilaPeso
+        if (xQueueReceive(xFilaPeso, &valor_recebido, portMAX_DELAY))
+        {   
+
+            if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP)
+            {   
+                vTaskPrioritySet(NULL, configMAX_PRIORITIES - 1);
+
                 requisicao_em_curso = true;
-                
+
                 memset(&settings, 0, sizeof(settings));
                 settings.result_fn = http_client_callback;
-                settings.use_proxy = 0;
 
-                snprintf(uri_com_dados, sizeof(uri_com_dados), "/data?contador=%d", valor_recebido);
+                // Alterado para formatar como peso (float) em vez de contador
+                snprintf(uri_com_dados, sizeof(uri_com_dados),
+                         "/data?peso=%.2f", valor_recebido);
 
                 cyw43_arch_lwip_begin();
-                err_t erro_conexao = httpc_get_file_dns(SERVER_IP, SERVER_PORT, uri_com_dados, &settings, http_client_callback, NULL, NULL);
+                err_t erro = httpc_get_file_dns(
+                    SERVER_IP,
+                    SERVER_PORT,
+                    uri_com_dados,
+                    &settings,
+                    (httpc_result_fn)http_client_callback,
+                    NULL,
+                    NULL);
                 cyw43_arch_lwip_end();
 
-                if (erro_conexao != ERR_OK) {
-                    TaskPrint("HTTP: Erro de Memoria/Socket! Tentando limpar...\n");
-                    requisicao_em_curso = false; 
-                    vTaskDelay(pdMS_TO_TICKS(5000)); // Espera 5 segundos para o Windows limpar a porta
+                if(erro != ERR_OK)
+                {
+                    TaskPrint("HTTP: Erro de disparo %d\n", erro);
+                    // IMPORTANTE: Se o disparo falhou, o callback não será chamado.
+                    // Precisamos devolver a prioridade para o resto do sistema respirar.
+                    vTaskPrioritySet(NULL, 1); 
+                    requisicao_em_curso = false;
+                    vTaskDelay(pdMS_TO_TICKS(5000));
                 }
             }
         }
-        // Aumentamos o delay entre envios para 5 segundos para garantir estabilidade
-        vTaskDelay(pdMS_TO_TICKS(5000)); 
     }
 }
 
-// ===================== OUTRAS TASKS =====================
-
-void release_product_irq_handler(uint gpio, uint32_t events) 
+// ===================== BOTÃO =====================
+void release_product_irq_handler(uint gpio, uint32_t events)
 {
     uint32_t tempo_atual = to_ms_since_boot(get_absolute_time());
 
-    if (tempo_atual - ultimo_tempo_botao > 250) 
+    if (tempo_atual - ultimo_tempo_botao > 250)
     {
         ultimo_tempo_botao = tempo_atual;
-
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
         xSemaphoreGiveFromISR(xSemaforoBotao, &xHigherPriorityTaskWoken);
         portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
     }
 }
 
-void release_product_button(void *pvParameters) 
+void calibration_system_button(void *pvParameters)
 {
-    gpio_init(BOTAO_A_PIN); 
-    gpio_set_dir(BOTAO_A_PIN, GPIO_IN); 
+    gpio_init(BOTAO_A_PIN);
+    gpio_set_dir(BOTAO_A_PIN, GPIO_IN);
     gpio_pull_up(BOTAO_A_PIN);
 
-    gpio_set_irq_enabled_with_callback(BOTAO_A_PIN, GPIO_IRQ_EDGE_FALL, true, &release_product_irq_handler);
+    gpio_set_irq_enabled_with_callback(
+        BOTAO_A_PIN,
+        GPIO_IRQ_EDGE_FALL,
+        true,
+        &release_product_irq_handler);
 
-    while (true) 
+    while (true)
     {
-        if (xSemaphoreTake(xSemaforoBotao, portMAX_DELAY) == pdPASS) 
-        {
-            printf("Botao A pressionado!\n");
-            vTaskDelay(pdMS_TO_TICKS(200));
+        if (xSemaphoreTake(xSemaforoBotao, portMAX_DELAY) == pdPASS)
+        {   
+            sistema_bloqueado = true;
+
+            UBaseType_t prioridadeOriginal = uxTaskPriorityGet(NULL);
+            vTaskPrioritySet(NULL, configMAX_PRIORITIES - 1);
+
+            execute_calibration(&FlashParamsCalibration);
+            calibration_flash_write(&FlashParamsCalibration);
+
+            vTaskPrioritySet(NULL, prioridadeOriginal);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            
+            oled_screen_finished_calibration();
+
+            sistema_bloqueado = false;
         }
     }
 }
 
-void wifi_connect_device(void *pvParameters) 
+// ===================== WIFI =====================
+void wifi_connect_device(void *pvParameters)
 {
-    if (cyw43_arch_init()) 
-    { 
-        vTaskDelete(NULL); 
-    }
+    if (cyw43_arch_init())
+        vTaskDelete(NULL);
 
     cyw43_arch_enable_sta_mode();
-    cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, 30000);
+    cyw43_arch_wifi_connect_timeout_ms(
+        WIFI_SSID,
+        WIFI_PASSWORD,
+        CYW43_AUTH_WPA2_AES_PSK,
+        30000);
 
-    while (true) 
+    while (true)
     {
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1); vTaskDelay(pdMS_TO_TICKS(500));
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0); vTaskDelay(pdMS_TO_TICKS(500));
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
-void sensor_pressao_task(void *pvParameters) 
+// ===================== OLED =====================
+void oled_task(void *pvParameters)
 {
-    hx711_config_t config;
-    config.pin_dt = HX711_DATA_PIN;
-    config.pin_sck = HX711_SCLK_PIN;
-    config.offset = 0;
-    config.scale = 1.0f;
-
-    hx711_init(config.pin_dt, config.pin_sck);
-
-    printf("Estabilizando sensor... Mantenha sem carga.\n");
-    vTaskDelay(pdMS_TO_TICKS(5000));
-
-    config.offset = hx711_get_tare(config.pin_dt, config.pin_sck, 10);
-    printf("Tara concluída! Offset: %ld\n", config.offset);
-    printf("--------------------------------------------------\n");
-
-    printf("Prepare o peso de 85g...\n");
-    for(int i = 3; i > 0; i--) 
-    {
-        printf("Coloque o peso! Iniciando em %d...\n", i);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-
-    printf("Calculando fator de escala... mantenha o peso parado.\n");
-
-    long leitura_com_peso = 0;
-    int amostras = 15; 
-    
-    for(int i = 0; i < amostras; i++) 
-    {
-        leitura_com_peso += hx711_read(config.pin_dt, config.pin_sck);
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    leitura_com_peso /= amostras;
-
-    config.scale = (float)(leitura_com_peso - config.offset) / 85.0f;
-
-    printf("Calibracao terminada! Seu SCALE e: %.4f\n", config.scale);
-    printf("--------------------------------------------------\n");
-
-    while (true) 
-    {
-        float peso_final = hx711_get_weight(config.pin_dt, config.pin_sck, config.offset, config.scale);
-        TaskPrint("Peso: %.2f g\n", peso_final);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
-
-void oled_task(void *pvParameters) 
-{
-    i2c_init(i2c1, 400000);
-    gpio_set_function(14, GPIO_FUNC_I2C); 
-    gpio_set_function(15, GPIO_FUNC_I2C);
-    gpio_pull_up(14); gpio_pull_up(15);
-
-    ssd1306_t disp; disp.external_vcc = false;
-    ssd1306_init(&disp, 128, 64, 0x3C, i2c1);
-
     int contador = 0;
     char buffer[20];
 
-    while (true) 
+    while (true)
     {
-        ssd1306_clear(&disp);
-        ssd1306_draw_string(&disp, 0, 8, 1, "Contador:");
-        snprintf(buffer, sizeof(buffer), "%d", contador);
-        ssd1306_draw_string(&disp, 0, 24, 2, buffer);
-        ssd1306_show(&disp);
-        
-        xQueueOverwrite(xFilaContador, &contador);
-        
-        contador++;
-        if (contador > 10) contador = 0;
-        vTaskDelay(pdMS_TO_TICKS(10000)); // Atualiza a cada 10 segundos
+        if (sistema_bloqueado) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        oled_screen_show_vending();
+
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}
+
+// ===================== HX711 TASK =====================
+void hx711_task(void *pvParameters)
+{
+    hx711_init(HX711_DATA_PIN, HX711_SCLK_PIN);
+    sleep_ms(3000);
+
+    long offset = FlashParamsCalibration.tare;
+    float scale = FlashParamsCalibration.scale_factor;
+
+    TaskPrint("HX711 iniciado\n");
+    TaskPrint("Offset: %ld | Scale: %.4f\n", offset, scale);
+
+    while (true)
+    {
+
+        if (sistema_bloqueado) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        float peso = hx711_get_weight(
+            HX711_DATA_PIN,
+            HX711_SCLK_PIN,
+            offset,
+            scale);
+
+        TaskPrint("Peso: %.2f g\n", peso);
+
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+}
+
+void bomba_task(void *pvParameters) {
+    // Pegamos a fila que foi passada por parâmetro na criação da task
+    QueueHandle_t fila = (QueueHandle_t)pvParameters;
+    int tempo_recebido;
+    
+    // Configuração do pino (Exemplo: pino 12)
+    const uint PINO_BOMBA = 12; 
+    gpio_init(PINO_BOMBA);
+    gpio_set_dir(PINO_BOMBA, GPIO_OUT);
+    gpio_put(PINO_BOMBA, 0); // Garante que começa desligada
+
+    while (true) {
+        // xQueueReceive trava a task aqui até que chegue algo na fila
+        // portMAX_DELAY significa: "espere o tempo que for preciso"
+        if (xQueueReceive(fila, &tempo_recebido, portMAX_DELAY)) {
+            
+            TaskPrint("BOMBA: Ativando por %d ms...\n", tempo_recebido);
+            
+            gpio_put(PINO_BOMBA, 1);               // LIGA
+            vTaskDelay(pdMS_TO_TICKS(tempo_recebido)); // ESPERA (sem travar o resto do sistema)
+            gpio_put(PINO_BOMBA, 0);               // DESLIGA
+            
+            vTaskDelay(pdMS_TO_TICKS(500));
+
+            float peso_final = hx711_get_weight(
+                HX711_DATA_PIN, 
+                HX711_SCLK_PIN, 
+                FlashParamsCalibration.tare, 
+                FlashParamsCalibration.scale_factor
+            );
+
+            // 2. Enviar o valor lido para a fila de telemetria HTTP
+            if (xFilaPeso != NULL) {
+                xQueueSend(xFilaPeso, &peso_final, 0);
+            }
+            
+            TaskPrint("BOMBA: Ciclo finalizado.\n");
+        }
     }
 }
 
 // ===================== MAIN =====================
-int main() 
+int main()
 {
     stdio_init_all();
 
-    // Inicializa o Mutex do Console
     xMutexConsole = xSemaphoreCreateMutex();
-
     xSemaforoBotao = xSemaphoreCreateBinary();
     xFilaContador = xQueueCreate(1, sizeof(int));
 
-    // Aumentamos a Stack para 4096 e prioridade 2 para garantir fluidez
-    xTaskCreate(http_post_task, "HTTP_Task", 2048, NULL, 1, NULL); // Prioridade 1
-    xTaskCreate(sensor_pressao_task, "Sensor_Task", 1024, NULL, 1, NULL);
-    
-    xTaskCreate(release_product_button, "Botao_Task", 512, NULL, 2, NULL);
-    xTaskCreate(wifi_connect_device, "WiFi_Task", 1024, NULL, 1, NULL);
-    xTaskCreate(oled_task, "OLED_Task", 1024, NULL, 1, NULL);
+    xFilaPeso = xQueueCreate(5, sizeof(float)); // Fila para valores float
+
+    oled_screen_init_device();
+
+    gpio_init(BOTAO_B_PIN);
+    gpio_set_dir(BOTAO_B_PIN, GPIO_IN);
+    gpio_pull_up(BOTAO_B_PIN);
+
+    char buffer[20];
+
+    calibration_flash_read(&FlashParamsCalibration);
+
+
+    if (FlashParamsCalibration.calibrated_flag != CALIBRATION_VALID_FLAG)
+    {   
+        execute_calibration(&FlashParamsCalibration);
+
+        bool button_a;
+
+        do 
+        {
+            tight_loop_contents();
+        } while (gpio_get(BOTAO_B_PIN) == 1);
+        
+        calibration_flash_write(&FlashParamsCalibration);
+        oled_screen_finished_calibration();
+    }
+
+    QueueHandle_t xFilaTemp = xQueueCreate(5, sizeof(int));
+    telemetry_set_bomba_queue(xFilaTemp);
+
+    xTaskCreate(http_post_task, "HTTP", 4096, NULL, 1, NULL);
+    xTaskCreate(calibration_system_button, "Botao", 2048, NULL, 2, NULL);
+    xTaskCreate(wifi_connect_device, "WiFi", 1024, NULL, 2, NULL);
+    xTaskCreate(oled_task, "OLED", 2048, NULL, 1, NULL);
+    xTaskCreate(hx711_task, "HX711", 2048, NULL, 2, NULL);
+    xTaskCreate(serial_telemetry_task, "Telemetry", 1024, NULL, 1, NULL);
+    xTaskCreate(bomba_task, "BombaTask", 1024, (void*)xFilaTemp, 2, NULL);
 
     vTaskStartScheduler();
-    while(1) 
-    { 
-        
+
+    while (1) 
+    {
+
     }
 }
