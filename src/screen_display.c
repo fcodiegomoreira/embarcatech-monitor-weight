@@ -21,6 +21,22 @@ void oled_screen_init_device(void)
     ssd1306_init(&disp, 128, 64, 0x3C, i2c1);
 }
 
+void oled_screen_show_vending(void)
+{
+    ssd1306_clear(&disp);
+    ssd1306_draw_string(&disp, 34, 25, 1, "Processando");
+    ssd1306_draw_string(&disp, 42, 37, 1, "dados...");
+    ssd1306_show(&disp);
+}
+
+void oled_screen_put_weight(void)
+{
+    ssd1306_clear(&disp);
+    ssd1306_draw_string(&disp, 15, 25, 1, "Inserir peso (85g)");
+    ssd1306_draw_string(&disp, 28, 37, 1, "Aguarde 5s...");
+    ssd1306_show(&disp);
+}
+
 void oled_screen_start_calibration(void)
 {
     ssd1306_clear(&disp);
@@ -33,8 +49,8 @@ void oled_screen_start_calibration(void)
 void oled_screen_finished_calibration(void)
 {
     ssd1306_clear(&disp);
-    ssd1306_draw_string(&disp, 34, 25, 1, "Finished");
-    ssd1306_draw_string(&disp, 25, 37, 1, "calibration");
+    ssd1306_draw_string(&disp, 36, 25, 1, "Calibracao");
+    ssd1306_draw_string(&disp, 36, 37, 1, "finalizada");
     ssd1306_show(&disp);
 }
 

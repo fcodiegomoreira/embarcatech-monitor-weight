@@ -31,12 +31,13 @@ static volatile bool sistema_bloqueado = false;
 // ================= GLOBAIS =================
 SemaphoreHandle_t xSemaforoBotao;
 QueueHandle_t xFilaContador;
+QueueHandle_t xFilaPeso; // Substitua xFilaContador por esta
 SemaphoreHandle_t xMutexConsole;
 
 static uint32_t ultimo_tempo_botao = 0;
 static volatile bool requisicao_em_curso = false;
 
-calibration_data_t FlashParamsCalibration;
+static calibration_data_t FlashParamsCalibration;
 
 // ====== FreeRTOS Static Memory ======
 void vApplicationGetIdleTaskMemory(StaticTask_t **ppxIdleTaskTCBBuffer,
@@ -77,6 +78,8 @@ void TaskPrint(const char *format, ...)
     }
 }
 
+TaskHandle_t xHTTPTaskHandle = NULL;
+
 // ===================== CALLBACK HTTP =====================
 static void http_client_callback(void *arg, httpc_result_t httpc_result,
                                  u32_t rx_content_len, u32_t srv_res, err_t err)
@@ -92,29 +95,41 @@ static void http_client_callback(void *arg, httpc_result_t httpc_result,
         TaskPrint("HTTP: Falha Cod %d\n", res_limpo);
     }
 
+    // Após o término (sucesso ou falha), voltamos a prioridade da Task HTTP para 1
+    if (xHTTPTaskHandle != NULL) {
+        vTaskPrioritySet(xHTTPTaskHandle, 1);
+    }
+
     requisicao_em_curso = false;
 }
 
 // ===================== TASK HTTP =====================
 void http_post_task(void *pvParameters)
 {
-    int valor_recebido;
+    float valor_recebido; // Alterado para float para receber o peso
     static httpc_connection_t settings;
     static char uri_com_dados[64];
 
+    xHTTPTaskHandle = xTaskGetCurrentTaskHandle();
+
     while (true)
     {
-        if (xQueueReceive(xFilaContador, &valor_recebido, portMAX_DELAY))
-        {
+        // Agora recebe da xFilaPeso
+        if (xQueueReceive(xFilaPeso, &valor_recebido, portMAX_DELAY))
+        {   
+
             if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP)
-            {
+            {   
+                vTaskPrioritySet(NULL, configMAX_PRIORITIES - 1);
+
                 requisicao_em_curso = true;
 
                 memset(&settings, 0, sizeof(settings));
                 settings.result_fn = http_client_callback;
 
+                // Alterado para formatar como peso (float) em vez de contador
                 snprintf(uri_com_dados, sizeof(uri_com_dados),
-                         "/data?contador=%d", valor_recebido);
+                         "/data?peso=%.2f", valor_recebido);
 
                 cyw43_arch_lwip_begin();
                 err_t erro = httpc_get_file_dns(
@@ -127,11 +142,14 @@ void http_post_task(void *pvParameters)
                     NULL);
                 cyw43_arch_lwip_end();
 
-                if (erro != ERR_OK)
+                if(erro != ERR_OK)
                 {
-                    TaskPrint("HTTP: Erro %d\n", erro);
+                    TaskPrint("HTTP: Erro de disparo %d\n", erro);
+                    // IMPORTANTE: Se o disparo falhou, o callback não será chamado.
+                    // Precisamos devolver a prioridade para o resto do sistema respirar.
+                    vTaskPrioritySet(NULL, 1); 
                     requisicao_em_curso = false;
-                    vTaskDelay(pdMS_TO_TICKS(10000));
+                    vTaskDelay(pdMS_TO_TICKS(5000));
                 }
             }
         }
@@ -152,7 +170,7 @@ void release_product_irq_handler(uint gpio, uint32_t events)
     }
 }
 
-void release_product_button(void *pvParameters)
+void calibration_system_button(void *pvParameters)
 {
     gpio_init(BOTAO_A_PIN);
     gpio_set_dir(BOTAO_A_PIN, GPIO_IN);
@@ -178,7 +196,6 @@ void release_product_button(void *pvParameters)
 
             vTaskPrioritySet(NULL, prioridadeOriginal);
             vTaskDelay(pdMS_TO_TICKS(100));
-
             
             oled_screen_finished_calibration();
 
@@ -221,14 +238,7 @@ void oled_task(void *pvParameters)
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
-
-        oled_screen_update_counter(contador);
-
-        xQueueOverwrite(xFilaContador, &contador);
-
-        contador++;
-        if (contador > 10)
-            contador = 0;
+        oled_screen_show_vending();
 
         vTaskDelay(pdMS_TO_TICKS(10000));
     }
@@ -288,6 +298,20 @@ void bomba_task(void *pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(tempo_recebido)); // ESPERA (sem travar o resto do sistema)
             gpio_put(PINO_BOMBA, 0);               // DESLIGA
             
+            vTaskDelay(pdMS_TO_TICKS(500));
+
+            float peso_final = hx711_get_weight(
+                HX711_DATA_PIN, 
+                HX711_SCLK_PIN, 
+                FlashParamsCalibration.tare, 
+                FlashParamsCalibration.scale_factor
+            );
+
+            // 2. Enviar o valor lido para a fila de telemetria HTTP
+            if (xFilaPeso != NULL) {
+                xQueueSend(xFilaPeso, &peso_final, 0);
+            }
+            
             TaskPrint("BOMBA: Ciclo finalizado.\n");
         }
     }
@@ -302,6 +326,8 @@ int main()
     xSemaforoBotao = xSemaphoreCreateBinary();
     xFilaContador = xQueueCreate(1, sizeof(int));
 
+    xFilaPeso = xQueueCreate(5, sizeof(float)); // Fila para valores float
+
     oled_screen_init_device();
 
     gpio_init(BOTAO_B_PIN);
@@ -311,18 +337,19 @@ int main()
     char buffer[20];
 
     calibration_flash_read(&FlashParamsCalibration);
-    oled_screen_start_calibration();
 
-    bool button_a;
-
-    do 
-    {
-        tight_loop_contents();
-    } while (gpio_get(BOTAO_B_PIN) == 1);
 
     if (FlashParamsCalibration.calibrated_flag != CALIBRATION_VALID_FLAG)
-    {
+    {   
         execute_calibration(&FlashParamsCalibration);
+
+        bool button_a;
+
+        do 
+        {
+            tight_loop_contents();
+        } while (gpio_get(BOTAO_B_PIN) == 1);
+        
         calibration_flash_write(&FlashParamsCalibration);
         oled_screen_finished_calibration();
     }
@@ -331,12 +358,12 @@ int main()
     telemetry_set_bomba_queue(xFilaTemp);
 
     xTaskCreate(http_post_task, "HTTP", 4096, NULL, 1, NULL);
-    xTaskCreate(release_product_button, "Botao", 2048, NULL, 2, NULL);
-    xTaskCreate(wifi_connect_device, "WiFi", 1024, NULL, 1, NULL);
+    xTaskCreate(calibration_system_button, "Botao", 2048, NULL, 2, NULL);
+    xTaskCreate(wifi_connect_device, "WiFi", 1024, NULL, 2, NULL);
     xTaskCreate(oled_task, "OLED", 2048, NULL, 1, NULL);
     xTaskCreate(hx711_task, "HX711", 2048, NULL, 2, NULL);
     xTaskCreate(serial_telemetry_task, "Telemetry", 1024, NULL, 1, NULL);
-    xTaskCreate(bomba_task, "BombaTask", 512, (void*)xFilaTemp, 2, NULL);
+    xTaskCreate(bomba_task, "BombaTask", 1024, (void*)xFilaTemp, 2, NULL);
 
     vTaskStartScheduler();
 

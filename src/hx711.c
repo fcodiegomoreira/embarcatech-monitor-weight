@@ -114,11 +114,14 @@ void execute_calibration(calibration_data_t *calib)
     hx711_init(config.pin_dt, config.pin_sck);
 
     printf("Estabilizando sensor... Mantenha sem carga.\n");
-    busy_wait_ms(7000);   // ⬅️ agora NÃO é mais vTaskDelay
 
+    oled_screen_start_calibration();
+    busy_wait_ms(3000);
     config.offset = hx711_get_tare(config.pin_dt, config.pin_sck, 10);
     printf("Tara concluída! Offset: %ld\n", config.offset);
     printf("--------------------------------------------------\n");
+
+    oled_screen_put_weight();
 
     printf("Prepare o peso de 85g...\n");
     for (int i = 3; i > 0; i--)
@@ -145,9 +148,8 @@ void execute_calibration(calibration_data_t *calib)
     printf("Offset: %ld\n", config.offset);
     printf("Scale : %.4f\n", config.scale);
     printf("--------------------------------------------------\n");
-
-
-    /* 🔽 Preenche a struct recebida por ponteiro */
+    oled_screen_finished_calibration();
+    busy_wait_ms(3000);
     calib->calibrated_flag = CALIBRATION_VALID_FLAG;
     calib->tare            = config.offset;   // SEM cast
     calib->scale_factor    = config.scale;
